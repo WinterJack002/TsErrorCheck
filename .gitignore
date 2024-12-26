@@ -30,3 +30,11 @@
 *.exe
 *.out
 *.app
+
+# VS project
+x64/
+
+*.ts
+*.filters
+*.vcxproj
+*.user
