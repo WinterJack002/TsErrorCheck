@@ -33,7 +33,7 @@
 
 # VS project
 x64/
-
+.vs/
 *.ts
 *.filters
 *.vcxproj
