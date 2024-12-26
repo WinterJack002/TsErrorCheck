@@ -1,0 +1,7 @@
+And_process/
+x64/
+
+*.ts
+*.filters
+*.vcxproj
+*.user
