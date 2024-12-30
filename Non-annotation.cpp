@@ -2,10 +2,11 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
-
+#include <string>
 const size_t TS_PACKET_SIZE = 188;
 const uint8_t SYNC_BYTE = 0x47;
 const size_t WINDOW_SIZE = 5;
+const size_t PCM_PKT_SIZE = 512;
 
 std::vector<uint8_t> readTsFile(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
@@ -18,7 +19,6 @@ std::vector<uint8_t> readTsFile(const std::string& filename) {
         std::istreambuf_iterator<char>());
     return data;
 }
-
 void writeAlignedTsFile(const std::string& filename, const std::vector<uint8_t>& alignedData) {
     std::ofstream outFile(filename, std::ios::binary);
     if (!outFile) {
@@ -44,15 +44,21 @@ uint16_t Pid(const std::vector<uint8_t>& data, size_t pos) {
 }
 
 bool Pid_sync(const std::vector<uint8_t>& data1, const std::vector<uint8_t>& data2, size_t pos1, size_t pos2) {
-    uint16_t pid1 = Pid(data1, pos1);
-    uint16_t pid2 = Pid(data2, pos2);
+    if (pos1 + 4 < data1.size() && pos2 + 4 < data2.size()) {
+        uint16_t pid1 = Pid(data1, pos1);
+        uint16_t pid2 = Pid(data2, pos2);
 
-    uint8_t byte1_1 = data1[pos1 + 3];
-    uint8_t byte1_2 = data1[pos1 + 4];
-    uint8_t byte2_1 = data2[pos2 + 3];
-    uint8_t byte2_2 = data2[pos2 + 4];
+        uint8_t byte1_1 = data1[pos1 + 3];
+        uint8_t byte1_2 = data1[pos1 + 4];
+        uint8_t byte2_1 = data2[pos2 + 3];
+        uint8_t byte2_2 = data2[pos2 + 4];
 
-    return (pid1 == pid2) && (byte1_1 == byte2_1) && (byte1_2 == byte2_2);
+        return (pid1 == pid2) && (byte1_1 == byte2_1) && (byte1_2 == byte2_2);
+
+    }
+    else {
+		return false;
+    }
 }
 
 struct AlignedDataResult {
@@ -60,7 +66,7 @@ struct AlignedDataResult {
     std::vector<uint8_t> diffData;
 };
 
-AlignedDataResult alignTsFiles(const std::vector<uint8_t>& originalData, const std::vector<uint8_t>& corruptedData) {
+AlignedDataResult alignTsFiles(const std::vector<uint8_t>& originalData, const std::vector<uint8_t>& corruptedData ) {
     std::vector<uint8_t> alignedData(originalData.size(), 0);
     std::vector<uint8_t> diffData(originalData.size(), 0);
     size_t originalPos = 0;
@@ -130,31 +136,102 @@ AlignedDataResult alignTsFiles(const std::vector<uint8_t>& originalData, const s
         originalPos += TS_PACKET_SIZE;
     }
 
-    std::cout << "originalData size: " << originalPos << std::endl;
-    std::cout << "corruptedData size: " << corruptedPos << std::endl;
+    std::cout << "比对完毕" << originalPos << std::endl;
+
     return { alignedData, diffData };
 }
 
-int main() {
-    std::vector<uint8_t> originalData = readTsFile("orig.ts");
-    std::vector<uint8_t> corruptedData = readTsFile("./Test_ERROR/orig_edit.ts");
-
-    AlignedDataResult result = alignTsFiles(originalData, corruptedData);
-
-    writeAlignedTsFile("./Test_ERROR/test_error_aligned.ts", result.alignedData);
-    writeAlignedTsFile("./Test_ERROR/test_error.ts", result.diffData);
-
-    std::vector<uint8_t> alignedDataYu;
-    size_t minSize = std::min(originalData.size(), result.alignedData.size());
-    alignedDataYu.reserve(minSize);
-
-    for (size_t i = 0; i < minSize; ++i) {
-        alignedDataYu.push_back(originalData[i] & result.alignedData[i]);
+std::vector<std::vector <uint8_t>> deinterleave(const std::vector <uint8_t>& interleavedData, int channel) {
+	std::vector<std::vector <uint8_t>> data(channel);
+    size_t dataSize = interleavedData.size();
+	int readcount = 0;
+	size_t bytetoread = std::min(dataSize - readcount * PCM_PKT_SIZE, PCM_PKT_SIZE);
+    while (bytetoread) {
+        int ch = channel;
+		while (ch) {
+			for (size_t i = 8; i < PCM_PKT_SIZE; i += 2) {
+                if ((i - 8) % (channel * 2) == (ch - 1) * 2 ) {
+					data[ch-1].push_back(interleavedData[i + readcount * PCM_PKT_SIZE + 1]);
+					data[ch-1].push_back(interleavedData[i + readcount * PCM_PKT_SIZE]);
+				}
+			}
+            ch--;
+		}
+        readcount++;
+		bytetoread = std::min(dataSize - readcount * PCM_PKT_SIZE, PCM_PKT_SIZE);
     }
+    
 
-    writeAlignedTsFile("./Test_ERROR/test_error_aligned2.ts", alignedDataYu);
+     //去除冗余数据
+    auto removeRedundancy = [](std::vector<uint8_t>& data) {
+        std::vector<uint8_t> result;
+        size_t dataSize = data.size();
+        for (size_t i = 0; i < dataSize; ) {
+            if (data[i] == 0x47) {
+                if (i + TS_PACKET_SIZE < dataSize && (data[i + TS_PACKET_SIZE] == 0x47 || data[i + TS_PACKET_SIZE] == 0xDE)) {
+                    result.insert(result.end(), data.begin() + i, data.begin() + i + TS_PACKET_SIZE);
+                    i += TS_PACKET_SIZE;
+                    while (i + 1 < dataSize && data[i] == 0xDE && data[i + 1] == 0xFA) {
+                        i += 2;
+                    }
+                }
+                else {
+                    i++;
+                }
+            }
+            else {
+                i++;
+            }
+        }
+        return result;
+        };
+    
+    std::cout << "解交织完毕" << std::endl;
 
-    std::cout << "TS files aligned and written to aligned.ts" << std::endl;
+	for (size_t i = 0; i < channel; i++) {
+		data[i] = removeRedundancy(data[i]);
+
+	}
+    return { data };
+}
+//输入参数：flag channel interleavedData originalData1 originalData2 ...
+int main(int argc, const char** argv) {
+	bool flag = std::stoi(argv[1]);
+	int channel = std::stoi(argv[2]);
+	if (argc < 5) {
+		std::cerr << "Usage: " << argv[0] << " flag channel interleavedData originalData1 originalData2 ..." << std::endl;
+		return 1;
+	}
+
+    if (flag) {
+        std::vector<uint8_t> InterleavedData = readTsFile(argv[3]);
+        std::vector<std::vector<uint8_t>> deinterleavedData = deinterleave(InterleavedData, channel);
+        for (size_t i = 0; i < channel; i++) {
+            std::vector<uint8_t> originalData = readTsFile(argv[4 + i]);
+            AlignedDataResult result = alignTsFiles(originalData, deinterleavedData[i]);
+            std::string alignedFilename = "test_error_aligned_" + std::to_string(i) + ".ts";
+            std::string diffFilename = "test_error_" + std::to_string(i) + ".ts";
+            writeAlignedTsFile(alignedFilename, result.alignedData);
+            writeAlignedTsFile(diffFilename, result.diffData);
+        }
+
+    }
+    else {
+        std::vector<uint8_t> originalData = readTsFile(argv[3]);
+        std::vector<uint8_t> corruptedData = readTsFile(argv[4]);
+        AlignedDataResult result = alignTsFiles(originalData, corruptedData);
+        writeAlignedTsFile("test_error_aligned.ts", result.alignedData);
+        writeAlignedTsFile("test_error.ts", result.diffData);
+    }
 
     return 0;
 }
+//int main() {
+//	std::vector <uint8_t> interleavedData = readTsFile("PCM_3.dat");
+//	std::vector<std::vector <uint8_t>> deinterleavedData = deinterleave(interleavedData, 3);
+//	for (size_t i = 0; i < 3; i++) {
+//		std::string filename = "deinterleavedData_" + std::to_string(i) + ".ts";
+//		writeAlignedTsFile(filename, deinterleavedData[i]);
+//	}   
+//}
+
